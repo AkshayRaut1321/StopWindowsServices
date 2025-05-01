@@ -42,11 +42,13 @@ namespace StopWindowsServices
                 };
 
                 #region to test this service without installing
-#if (!DEBUG)
-                                ServiceBase.Run(ServicesToRun);
-#else
-                service.RunService();
-#endif
+
+                #if (!DEBUG)
+                    ServiceBase.Run(ServicesToRun);
+                #else
+                    service.RunServiceFirstTime();
+                #endif
+
                 #endregion
             }
             else
