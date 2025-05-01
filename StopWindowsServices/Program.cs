@@ -2,6 +2,7 @@
 using System.IO;
 using System.Windows.Forms;
 using System;
+using System.Threading;
 
 namespace StopWindowsServices
 {
@@ -40,13 +41,14 @@ namespace StopWindowsServices
                 {
                     service
                 };
+                var cts = new CancellationTokenSource();
 
                 #region to test this service without installing
 
                 #if (!DEBUG)
                     ServiceBase.Run(ServicesToRun);
                 #else
-                    service.RunServiceFirstTime();
+                    service.RunServiceFirstTime(cts.Token);
                 #endif
 
                 #endregion

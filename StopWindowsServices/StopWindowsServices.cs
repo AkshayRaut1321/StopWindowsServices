@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Timers;
 using Timer = System.Timers.Timer;
 using System.Diagnostics;
+using System.Threading;
 
 namespace StopWindowsServices
 {
@@ -16,6 +17,7 @@ namespace StopWindowsServices
         static object acquireStop = new object();
         private const int MaxRetryAttempts = 5;
         private const int RetryDelayMs = 2000; // 2 seconds for retry backoff
+        private CancellationTokenSource _cts;
 
         public StopWindowsServices()
         {
@@ -25,6 +27,8 @@ namespace StopWindowsServices
             {
                 EventLog.CreateEventSource("StopWindowsServices", "Application");
             }
+            _startupTimer = new Timer(IniFile.WS_TIMEOUT);
+            _startupTimer.Elapsed += _startupTimer_Elapsed;
         }
 
         protected override void OnStart(string[] args)
@@ -33,12 +37,14 @@ namespace StopWindowsServices
             {
                 try
                 {
+                    _cts = new CancellationTokenSource();
+
                     // Log service start event
                     EventLog.WriteEntry("StopWindowsServices", "Service is starting.", EventLogEntryType.Information);
 
-                    Task.Run(() => RunServiceFirstTime());
-                    _startupTimer = new Timer(IniFile.WS_TIMEOUT);
-                    _startupTimer.Elapsed += _startupTimer_Elapsed;
+                    System.Threading.Thread.Sleep(10000);
+
+                    Task.Run(() => RunServiceFirstTime(_cts.Token));
                     _startupTimer.Start();
 
                     // Log timer start event
@@ -63,11 +69,11 @@ namespace StopWindowsServices
             }
         }
 
-        internal void RunServiceFirstTime()
+        internal void RunServiceFirstTime(CancellationToken token)
         {
             lock (acquireStop)
             {
-                RunService();
+                RunService(token);
             }
         }
 
@@ -82,10 +88,10 @@ namespace StopWindowsServices
         void _startupTimer_Elapsed(object sender, ElapsedEventArgs e)
         {
             _startupTimer.Stop();
-            RunService();
+            RunService(_cts.Token);
         }
 
-        void RunService()
+        void RunService(CancellationToken token)
         {
             try
             {
@@ -93,7 +99,9 @@ namespace StopWindowsServices
                 if (serviceList != null)
                 {
                     // Running CheckAndStopWindowsServices asynchronously
-                    Task.Run(() => CheckAndStopWindowsServices(serviceList));
+
+                    Task.Run(() => CheckAndStopWindowsServices(serviceList, token));
+                    //CheckAndStopWindowsServices(serviceList);
                 }
                 else
                 {
@@ -114,60 +122,64 @@ namespace StopWindowsServices
             }
         }
 
-        private void CheckAndStopWindowsServices(List<string> listServiceNames)
+        private void CheckAndStopWindowsServices(List<string> listServiceNames, CancellationToken token)
         {
-            var listServices = ServiceController.GetServices();
-            foreach (var service in listServices)
+            if (token.IsCancellationRequested)
             {
+                Logger.WriteLog("Service cancellation requested. Exiting service loop.");
+                return;
+            }
+
+            foreach (string serviceName in listServiceNames)
+            {
+                // Retry logic for external services not yet started
                 try
                 {
-                    // Retry logic for external services not yet started
-                    int retries = MaxRetryAttempts;
-                    while (retries-- > 0)
+                    var service = ServiceController.GetServices().FirstOrDefault(s => s.DisplayName.ToLower() == serviceName);
+                    if (service != null)
                     {
                         try
                         {
-                            if (listServiceNames.Contains(service.DisplayName.ToLower()))
+                            service.Refresh(); // Ensure the status is fresh
+                            if (service.Status == ServiceControllerStatus.Running || service.Status == ServiceControllerStatus.StartPending)
                             {
-                                service.Refresh(); // Ensure the status is fresh
-                                if (service.Status == ServiceControllerStatus.Running)
-                                {
-                                    service.Stop();
-                                    service.WaitForStatus(ServiceControllerStatus.Stopped);
-                                    //ServiceHelper.ChangeStartMode(service, ServiceStartMode.Disabled);
-                                }
+                                service.Stop();
+                                service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
                             }
-                            break; // Exit the retry loop if successful
+                            else if (service.Status != ServiceControllerStatus.Stopped)
+                            {
+                                Logger.WriteLog($"Service {service.Status}");
+                            }
+                        }
+                        catch (ExternalException ex)
+                        {
+                            Logger.WriteLog("StopWindowsServices : CheckAndStopWindowsServices:" + ex.Message, ex);
+
+                            EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException for service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
                         }
                         catch (Exception ex)
                         {
-                            EventLog.WriteEntry("StopWindowsServices", $"Error stopping service {service.DisplayName}: Attempt {MaxRetryAttempts - retries} failed: {ex.Message}", EventLogEntryType.Error);
+                            EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error stopping service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
 
-                            Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices : Attempt {MaxRetryAttempts - retries} failed: {ex.Message}", ex);
-                            if (retries == 0)
-                            {
-                                // Log final failure after retry attempts are exhausted
-                                Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices : Service {service.DisplayName} failed after {MaxRetryAttempts} attempts.", ex);
-                            }
-                            else
-                            {
-                                // Delay before retrying
-                                System.Threading.Thread.Sleep(RetryDelayMs);
-                            }
+                            Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices: {ex.Message}", ex);
                         }
+                    }
+                    else
+                    {
+                        Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices: service not found {service.DisplayName}");
                     }
                 }
                 catch (ExternalException ex)
                 {
                     Logger.WriteLog("StopWindowsServices : CheckAndStopWindowsServices :" + ex.Message, ex);
 
-                    EventLog.WriteEntry("StopWindowsServices", $"ExternalException in CheckAndStopWindowsServices for service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
+                    EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException: {ex.Message}", EventLogEntryType.Error);
                 }
                 catch (Exception ex)
                 {
-                    Logger.WriteLog("StopWindowsServices : CheckAndStopWindowsServices :" + ex.Message, ex);
+                    EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error: {ex.Message}", EventLogEntryType.Error);
 
-                    EventLog.WriteEntry("StopWindowsServices", $"Error in CheckAndStopWindowsServices for service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
+                    Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices error: {ex.Message}", ex);
                 }
             }
         }
