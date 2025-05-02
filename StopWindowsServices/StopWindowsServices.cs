@@ -153,15 +153,15 @@ namespace StopWindowsServices
                         }
                         catch (ExternalException ex)
                         {
-                            Logger.WriteLog("StopWindowsServices : CheckAndStopWindowsServices:" + ex.Message, ex);
+                            Logger.WriteLog($"StopWindowsServices 1: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
 
                             EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException for service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
                         }
                         catch (Exception ex)
                         {
-                            EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error stopping service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
+                            Logger.WriteLog($"StopWindowsServices 2: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
 
-                            Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices: {ex.Message}", ex);
+                            EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error stopping service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
                         }
                     }
                     else
@@ -171,15 +171,15 @@ namespace StopWindowsServices
                 }
                 catch (ExternalException ex)
                 {
-                    Logger.WriteLog("StopWindowsServices : CheckAndStopWindowsServices :" + ex.Message, ex);
+                    Logger.WriteLog($"StopWindowsServices 3: CheckAndStopWindowsServices: {ex.GetType()}:" + ex.Message, ex);
 
                     EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException: {ex.Message}", EventLogEntryType.Error);
                 }
                 catch (Exception ex)
                 {
-                    EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error: {ex.Message}", EventLogEntryType.Error);
+                    Logger.WriteLog($"StopWindowsServices 4: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
 
-                    Logger.WriteLog($"StopWindowsServices : CheckAndStopWindowsServices error: {ex.Message}", ex);
+                    EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", EventLogEntryType.Error);
                 }
             }
         }
