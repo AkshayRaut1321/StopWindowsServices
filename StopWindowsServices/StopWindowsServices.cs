@@ -15,57 +15,79 @@ namespace StopWindowsServices
     {
         private Timer _startupTimer;
         static object acquireStop = new object();
-        private const int MaxRetryAttempts = 5;
-        private const int RetryDelayMs = 2000; // 2 seconds for retry backoff
         private CancellationTokenSource _cts;
 
         public StopWindowsServices()
         {
             InitializeComponent();
-            // Set up the event log source if not already done
-            if (!EventLog.SourceExists("StopWindowsServices"))
-            {
-                EventLog.CreateEventSource("StopWindowsServices", "Application");
-            }
-            _startupTimer = new Timer(IniFile.WS_TIMEOUT);
-            _startupTimer.Elapsed += _startupTimer_Elapsed;
-        }
-
-        protected override void OnStart(string[] args)
-        {
+            // Safe EventLog setup
             try
             {
-                try
+                if (!EventLog.SourceExists("StopWindowsServices"))
                 {
-                    _cts = new CancellationTokenSource();
-
-                    // Log service start event
-                    EventLog.WriteEntry("StopWindowsServices", "Service is starting.", EventLogEntryType.Information);
-
-                    System.Threading.Thread.Sleep(10000);
-
-                    Task.Run(() => RunServiceFirstTime(_cts.Token));
-                    _startupTimer.Start();
-
-                    // Log timer start event
-                    EventLog.WriteEntry("StopWindowsServices", "Timer started to check services.", EventLogEntryType.Information);
-                }
-                catch (Exception ex)
-                {
-                    // Log error
-                    EventLog.WriteEntry("StopWindowsServices", $"Error in OnStart: {ex.Message}", EventLogEntryType.Error);
-
-                    Logger.WriteLog("StopWindowsServices : OnStart :" + ex.Message, ex);
-                    if (_startupTimer == null)
-                        Logger.WriteLog("Start up timer is null");
-
-                    _startupTimer.Stop();
-                    _startupTimer.Start();
+                    EventLog.CreateEventSource("StopWindowsServices", "Application");
                 }
             }
             catch (Exception ex)
             {
+                Logger.WriteLog("EventLog setup failed: " + ex.Message + Environment.NewLine);
+            }
+
+            // Initialize Timer safely
+            try
+            {
+                _startupTimer = new Timer(IniFile.WS_TIMEOUT);
+                _startupTimer.Elapsed += _startupTimer_Elapsed;
+            }
+            catch (Exception ex)
+            {
+                Logger.WriteLog("Timer init failed: " + ex.Message + Environment.NewLine);
+            }
+        }
+
+        protected override void OnStart(string[] args)
+        {
+            _cts = new CancellationTokenSource();
+            try
+            {
+                // Log service start
+                try
+                {
+                    EventLog.WriteEntry("StopWindowsServices", "Service is starting.", EventLogEntryType.Information);
+                }
+                catch (Exception ex)
+                {
+                    Logger.WriteLog("EventLog Write failed: " + ex.Message + Environment.NewLine);
+                }
+
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(10000); // Async sleep without blocking
+                        RunServiceFirstTime(_cts.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.WriteLog("Background startup task failed: " + ex.Message, ex);
+                        EventLog.WriteEntry("StopWindowsServices", "Startup background task failed: " + ex.Message, EventLogEntryType.Error);
+                    }
+                });
+                _startupTimer.Start();
+
+                // Log timer start event
+                EventLog.WriteEntry("StopWindowsServices", "Timer started to check services.", EventLogEntryType.Information);
+            }
+            catch (Exception ex)
+            {
+                // Log error
+                EventLog.WriteEntry("StopWindowsServices", $"Error in OnStart: {ex.Message}", EventLogEntryType.Error);
                 Logger.WriteLog("StopWindowsServices : OnStart :" + ex.Message, ex);
+                if (_startupTimer == null)
+                    Logger.WriteLog("Start up timer is null");
+
+                _startupTimer.Stop();
+                _startupTimer.Start();
             }
         }
 
@@ -79,10 +101,17 @@ namespace StopWindowsServices
 
         protected override void OnStop()
         {
-            _startupTimer.Stop();
+            _startupTimer?.Stop();
+            _cts?.Cancel();
 
-            // Log service stop event
-            EventLog.WriteEntry("StopWindowsServices", "Service is stopping.", EventLogEntryType.Information);
+            try
+            {
+                EventLog.WriteEntry("StopWindowsServices", "Service is stopping.", EventLogEntryType.Information);
+            }
+            catch
+            {
+                // Swallow silently — EventLog failure shouldn't crash OnStop
+            }
         }
 
         void _startupTimer_Elapsed(object sender, ElapsedEventArgs e)
@@ -106,19 +135,18 @@ namespace StopWindowsServices
                 else
                 {
                     Logger.WriteLog("No services found in configuration.", null);
-
                     EventLog.WriteEntry("StopWindowsServices", "No services found in configuration for timer check.", EventLogEntryType.Warning);
                 }
             }
             catch (Exception ex)
             {
                 Logger.WriteLog("StopWindowsServices : _startupTimer_Elapsed : " + ex.Message, ex);
-
                 EventLog.WriteEntry("StopWindowsServices", $"Error in _startupTimer_Elapsed: {ex.Message}", EventLogEntryType.Error);
             }
             finally
             {
-                _startupTimer.Start();
+                if (!_cts?.IsCancellationRequested ?? false)
+                    _startupTimer?.Start();
             }
         }
 
@@ -132,6 +160,9 @@ namespace StopWindowsServices
 
             foreach (string serviceName in listServiceNames)
             {
+                if (token.IsCancellationRequested)
+                    break;
+
                 // Retry logic for external services not yet started
                 try
                 {
@@ -150,17 +181,19 @@ namespace StopWindowsServices
                             {
                                 Logger.WriteLog($"Service {service.Status}");
                             }
+                            else if (service.Status == ServiceControllerStatus.Stopped)
+                            {
+                                Logger.WriteLog($"Service {service.DisplayName} already stopped.");
+                            }
                         }
                         catch (ExternalException ex)
                         {
                             Logger.WriteLog($"StopWindowsServices 1: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
-
                             EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException for service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
                         }
                         catch (Exception ex)
                         {
                             Logger.WriteLog($"StopWindowsServices 2: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
-
                             EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices Error stopping service {service.DisplayName}: {ex.Message}", EventLogEntryType.Error);
                         }
                     }
@@ -172,13 +205,11 @@ namespace StopWindowsServices
                 catch (ExternalException ex)
                 {
                     Logger.WriteLog($"StopWindowsServices 3: CheckAndStopWindowsServices: {ex.GetType()}:" + ex.Message, ex);
-
                     EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices ExternalException: {ex.Message}", EventLogEntryType.Error);
                 }
                 catch (Exception ex)
                 {
                     Logger.WriteLog($"StopWindowsServices 4: CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", ex);
-
                     EventLog.WriteEntry("StopWindowsServices", $"CheckAndStopWindowsServices: {ex.GetType()}: {ex.Message}", EventLogEntryType.Error);
                 }
             }
